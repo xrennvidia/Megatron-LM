@@ -238,6 +238,7 @@ class HybridModel(LanguageModule):
             post_process=self.post_process,
             dtype=config.params_dtype,
             pg_collection=self.pg_collection,
+            name="decoder",
         )
 
         # MTP block - uses mtp_block_spec from hybrid_stack_spec.submodules
@@ -257,6 +258,7 @@ class HybridModel(LanguageModule):
                 mtp_layer_pattern=self.mtp_pattern,
                 mtp_num_depths=self.mtp_num_depths,
                 hybrid_submodules=hybrid_submodules,
+                name="mtp",
             )
 
         # Output
