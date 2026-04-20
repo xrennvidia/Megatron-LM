@@ -7,7 +7,6 @@ import torch
 
 from megatron.core.utils import is_torch_min_version
 
-
 @dataclass
 class DistributedDataParallelConfig:
     """
