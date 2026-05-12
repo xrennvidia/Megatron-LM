@@ -21,7 +21,7 @@ WORLD_SIZE=$(($GPUS_PER_NODE*$NUM_NODES))
 
 # Path to the pretrain_gpt.py script, assuming this script 
 # is run from the root of the Megatron-LM repository.
-PRETRAIN_SCRIPT_PATH="pretrain_gpt.py"
+PRETRAIN_SCRIPT_PATH="pretrain_hybrid.py"
 
 # NSight Profiling
 NSYS_PROFILE=${NSYS_PROFILE:-0}
@@ -43,8 +43,8 @@ TP_SIZE=1
 CP_SIZE=1
 PP_SIZE=1
 MICRO_BATCH_SIZE=1
-GLOBAL_BATCH_SIZE=128
-NUM_LAYERS=32
+GLOBAL_BATCH_SIZE=64
+NUM_LAYERS=8
 DTYPE="fp8"
 SEQ_LENGTH=8192
 MAX_POSITION_EMBEDDINGS=8192
@@ -84,6 +84,16 @@ MODEL_ARGS=(
     --apply-layernorm-1p
     --untie-embeddings-and-output-weights
     --disable-bias-linear
+    --is-hybrid-model
+    --hybrid-override-pattern EEEEEEEE
+    --spec megatron.core.models.hybrid.hybrid_layer_specs hybrid_stack_spec
+    # MoE config (Mixtral-style: 8 experts, top-2, alltoall dispatcher).
+    --num-experts 8
+    --moe-router-topk 2
+    --moe-router-load-balancing-type aux_loss
+    --moe-aux-loss-coeff 1e-2
+    --moe-grouped-gemm
+    --moe-token-dispatcher-type alltoall
 )
 
 TRAINING_ARGS=(
@@ -120,9 +130,9 @@ if [ "${USE_MEGATRON_FSDP}" = 1 ]; then
         --init-model-with-meta-device
         --ckpt-format fsdp_dtensor
         --grad-reduce-in-bf16   # Will be deprecated soon!
-        --use-nccl-ub
-        --fsdp-double-buffer
-        --fsdp-manual-registration
+        # --use-nccl-ub  # disabled: NCCL user buffers don't work with --expert-model-parallel-size > 1
+        # --fsdp-double-buffer
+        # --fsdp-manual-registration  # disabled: requires --use-nccl-ub (asserted in arguments.py:1058)
         # To enable HFSDP, DP full-sharding of the optimizer state with
         # hierarchical data parallelism (DP-Outer=2, DP-Inner=DP//2)...
         # --num-distributed-optimizer-instances 2
@@ -135,6 +145,16 @@ if [ "${USE_MEGATRON_FSDP}" = 1 ]; then
         # --use-precision-aware-optimizer
         # To use full-iteration CUDA graphs with Megatron-FSDP...
         # --cuda-graph-impl full_iteration
+        # To use TransformerEngine-based (partial) CUDA graphs with Megatron-FSDP.
+        # Empty cuda-graph-scope captures the whole Transformer layer; pass one or
+        # more of {attn, mlp, moe, moe_router, moe_preprocess, mamba} for sub-layer
+        # scopes.
+        --cuda-graph-impl local
+        --cuda-graph-warmup-steps 3
+        # Graph the MoE router + preprocess (static-shape regions). Expert
+        # dispatch is dynamic and stays out of the graph. `moe` and `moe_router`
+        # are mutually exclusive; `moe_preprocess` requires `moe_router`.
+        --cuda-graph-scope mamba attn moe_router moe_preprocess
     )
 fi
 
@@ -153,6 +173,8 @@ fi
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size $TP_SIZE
     --context-parallel-size $CP_SIZE
+    --expert-model-parallel-size 2
+    --expert-tensor-parallel-size 1
     --sequence-parallel
 )
 
@@ -204,7 +226,7 @@ EVAL_AND_LOGGING_ARGS=(
     --log-throughput
     --distributed-timeout-minutes 60
     --save "$CHECKPOINT_PATH"
-    --load "$CHECKPOINT_PATH" 
+    --load "$CHECKPOINT_PATH"
     --tensorboard-dir "$TENSORBOARD_LOGS_PATH"
 )
 
