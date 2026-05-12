@@ -115,6 +115,23 @@ def _set_warmup_end():
     _IS_GRAPH_WARMUP = False
 
 
+def _set_skip_fp8_weight_update_tensor(skip: bool) -> None:
+    """Set the FP8 weight-update skip flag, working across TE versions.
+
+    Older TE exposed ``FP8GlobalStateManager.set_skip_fp8_weight_update_tensor``
+    as a classmethod. In newer TE (>=2.14), the state moved to an instance
+    ``quantization_state.skip_fp8_weight_update_tensor`` attribute that is
+    lazily allocated.
+    """
+    if hasattr(FP8GlobalStateManager, "set_skip_fp8_weight_update_tensor"):
+        FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(skip)
+        return
+    qstate = FP8GlobalStateManager.quantization_state
+    if qstate.skip_fp8_weight_update_tensor is None:
+        qstate.skip_fp8_weight_update_tensor = torch.empty(1, dtype=torch.float32, device="cuda")
+    qstate.skip_fp8_weight_update_tensor.fill_(skip)
+
+
 @dataclass
 class CudagraphBufferMetadata:
     """
@@ -608,7 +625,7 @@ class _CudagraphReplayNode(torch.autograd.Function):
             # Note that FP8GlobalStateManager.is_first_fp8_module() is inacccurate as each
             # layer may be in its own fp8 context, when the fp8 recipe != delayed_scaling
             if runner.is_first_layer and (runner.fp8_param_cache_updated != is_first_microbatch):
-                FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(not is_first_microbatch)
+                _set_skip_fp8_weight_update_tensor(not is_first_microbatch)
                 runner.fp8_param_cache_updated = is_first_microbatch
 
         runner.fwd_graph.replay()
@@ -738,13 +755,13 @@ class _CudaGraphRunner(torch.nn.Module):
 
             if self.fp8_enabled:
                 self.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-                FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(False)
+                _set_skip_fp8_weight_update_tensor(False)
 
             if self.fp4_enabled:
                 from megatron.core.fp4_utils import get_fp4_recipe  # to avoid circular import
 
                 self.fp4_recipe = get_fp4_recipe(self.base_module.config)
-                FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(False)
+                _set_skip_fp8_weight_update_tensor(False)
 
     def __str__(self):
         return "%s; hid %s" % (
@@ -799,6 +816,17 @@ class _CudaGraphRunner(torch.nn.Module):
         self.kwargs = kwargs
         self.outputs = outputs
 
+        # When using Megatron-FSDP, un-shard the parameters for capture.
+        mfsdp_model = None
+        param_repr = next(self.base_module.parameters())
+        if hasattr(param_repr, "__fsdp_param__"):
+            # Un-shard the module managed by the runner.
+            mfsdp_model = param_repr._megatron_fsdp_model
+            mfsdp_model._replace_param_with_raw_if_needed()
+            mfsdp_model.all_gather_and_wait_parameters_ready(
+                params=list(self.base_module.parameters()), prefetch=False, bwd=False
+            )
+
         # Save buffers, grads, and other variables that may be affected by graph warmup.
         # For example, megatron/core/transformer/moe/router.py's expert_bias is a persistent
         # buffer updated each forward pass by '_apply_expert_bias()'. So we need to ensure
@@ -812,8 +840,20 @@ class _CudaGraphRunner(torch.nn.Module):
                 buffer_backup.append(buf.clone())
 
             grad_backup = []
-            for param in self.base_module.parameters():
-                grad_backup.append(param.main_grad.clone() if hasattr(param, "main_grad") else None)
+            if mfsdp_model is not None:
+                # Snapshot Megatron-FSDP sharded gradient buffers, which can be modified
+                # by the warmup FWD-BWD step prior to partial CG capture.
+                for param_group in mfsdp_model.param_and_grad_buffer.parameter_groups:
+                    grad_backup.append(
+                        param_group.main_grad_buffer.data.clone()
+                        if hasattr(param_group, "main_grad_buffer")
+                        else None
+                    )
+            else:
+                for param in self.base_module.parameters():
+                    grad_backup.append(
+                        param.main_grad.clone() if hasattr(param, "main_grad") else None
+                    )
 
             saved_fp8_tensors = None
             if self.fp8_enabled:
@@ -1012,14 +1052,30 @@ class _CudaGraphRunner(torch.nn.Module):
 
             if self.fp8_enabled:
                 restore_fp8_tensors([self.base_module], saved_fp8_tensors)
-            # restore cached grads
-            for main_grad_copy, param in zip(grad_backup, self.base_module.parameters()):
-                if main_grad_copy is not None:
-                    param.main_grad.copy_(main_grad_copy)
+
+            if mfsdp_model is not None:
+                # Restore Megatron-FSDP sharded gradient buffers.
+                for param_group, group_grad in zip(
+                    mfsdp_model.param_and_grad_buffer.parameter_groups, grad_backup
+                ):
+                    if hasattr(param_group, "main_grad_buffer"):
+                        param_group.main_grad_buffer.data.copy_(group_grad)
+            else:
+                # restore cached grads
+                for main_grad_copy, param in zip(grad_backup, self.base_module.parameters()):
+                    if main_grad_copy is not None:
+                        param.main_grad.copy_(main_grad_copy)
 
             # restore cached buffers
             for buf_copy, buf in zip(buffer_backup, self.base_module.buffers()):
                 buf.copy_(buf_copy)
+
+        # When using Megatron-FSDP, re-shard the parameters to free memory.
+        if mfsdp_model is not None:
+            for param in self.base_module.parameters():
+                bucket_id = mfsdp_model.param_and_grad_buffer.param_to_param_group[param]
+                mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=False)
+            mfsdp_model._replace_param_with_distributed_if_needed()
 
         if is_moe:
             for name in tracker:
@@ -1028,6 +1084,17 @@ class _CudaGraphRunner(torch.nn.Module):
     def create_bwd_graph(self):
         """Create a bwd cudagraph for this runner. Should be called inside
         'create_cudagraphs()'."""
+
+        # When using Megatron-FSDP, un-shard the parameters for capture.
+        mfsdp_model = None
+        param_repr = next(self.base_module.parameters())
+        if hasattr(param_repr, "__fsdp_param__"):
+            # Un-shard the module managed by the runner.
+            mfsdp_model = param_repr._megatron_fsdp_model
+            mfsdp_model._replace_param_with_raw_if_needed()
+            mfsdp_model.all_gather_and_wait_parameters_ready(
+                params=list(self.base_module.parameters()), prefetch=False, bwd=True
+            )
 
         # unlike 'fwd_buffer_reuse_ref_count', 'bwd_buffer_reuse_ref_count' may not decrement
         # to 0 when activation checkpointing is used. See [interaction with recompute].
@@ -1188,6 +1255,13 @@ class _CudaGraphRunner(torch.nn.Module):
             # stored in 'bwd_cudagraph_buffer'
             self.static_grad_inputs = tree_map(replace_with_weak_ref, self.static_grad_inputs)
             self.static_grad_outputs = tree_map(replace_with_weak_ref, self.static_grad_outputs)
+
+        # When using Megatron-FSDP, re-shard the parameters to free memory.
+        if mfsdp_model is not None:
+            for param in self.base_module.parameters():
+                bucket_id = mfsdp_model.param_and_grad_buffer.param_to_param_group[param]
+                mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=True)
+            mfsdp_model._replace_param_with_distributed_if_needed()
 
         delattr(self, "args")
         delattr(self, "kwargs")
@@ -1504,10 +1578,8 @@ class CudaGraphManager(torch.nn.Module):
 
         if module._forward_pre_hooks:
             for _, hook in module._forward_pre_hooks.items():
-                assert (
-                    inspect.getmodule(hook) == distributed_data_parallel
-                ), "Tried to cudagraph a module with user registered pre-forward hooks, \
-                which is not allowed."
+                if inspect.getmodule(hook) != distributed_data_parallel:
+                    continue
                 # Only hooks from Mcore DDP, which take no args, should be called at this point.
                 hook(module)
 
