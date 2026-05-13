@@ -12,7 +12,7 @@ mkdir -p "$(dirname "$NSYS_PROFILE_PATH")"
 mkdir -p "$(dirname "$TENSORBOARD_LOGS_PATH")"
 
 # Distributed training setup
-GPUS_PER_NODE=8
+GPUS_PER_NODE=4
 NUM_NODES=1
 MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
@@ -85,8 +85,9 @@ MODEL_ARGS=(
     --untie-embeddings-and-output-weights
     --disable-bias-linear
     --is-hybrid-model
-    --hybrid-override-pattern EEEEEEEE
+    --hybrid-override-pattern MEMEMEME
     --spec megatron.core.models.hybrid.hybrid_layer_specs hybrid_stack_spec
+    --spec megatron.core.models.mamba.mamba_layer_specs mamba_stack_spec
     # MoE config (Mixtral-style: 8 experts, top-2, alltoall dispatcher).
     --num-experts 8
     --moe-router-topk 2
@@ -94,6 +95,10 @@ MODEL_ARGS=(
     --moe-aux-loss-coeff 1e-2
     --moe-grouped-gemm
     --moe-token-dispatcher-type alltoall
+    # Partial CG
+    --cuda-graph-impl local
+    --cuda-graph-warmup-steps 3
+    --cuda-graph-scope mamba attn moe_router moe_preprocess
 )
 
 TRAINING_ARGS=(
@@ -166,6 +171,7 @@ if [[ "$DTYPE" == "fp8" ]]; then
         "--fp8-amax-history-len 1024"
         "--fp8-amax-compute-algo max"
         "--fp8-param-gather"
+        "--fp8-recipe tensorwise"
     )
 fi
 
