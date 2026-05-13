@@ -2790,10 +2790,10 @@ class ParamAndGradBuffer:
         this gradient shard will increase memory utilization as this gradient is a
         persistent casted-copy of the accumulated gradient.
         """
-        for name, param in self.optimizer_named_parameters:
-            if not self.ddp_config.megatron_fsdp_cuda_graph_mode:
-                # Dereference the sharded gradient to reclaim memory
-                # unless a full-iteration CUDA graph is utilized.
+        if not self.ddp_config.megatron_fsdp_cuda_graph_mode:
+            # Dereference the sharded gradient to reclaim memory
+            # unless a full-iteration CUDA graph is utilized.
+            for name, param in self.optimizer_named_parameters:
                 param.grad = None
                 if hasattr(param, "decoupled_grad"):
                     param.decoupled_grad = None
