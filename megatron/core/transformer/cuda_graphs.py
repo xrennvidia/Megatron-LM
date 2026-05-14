@@ -760,6 +760,9 @@ class _CudaGraphRunner(torch.nn.Module):
             base_module
         )
 
+        self.mfsdp_model = None
+        self.mfsdp_hook_cache = {}
+
         # We use this attribute to record the value of 'is_first_microbatch' each fwd cudagraph
         # replay so that way we only update the value of this flag in FP8GlobalStateManager when
         # it changes which incurs an HtoD sync
@@ -841,14 +844,21 @@ class _CudaGraphRunner(torch.nn.Module):
         self.kwargs = kwargs
         self.outputs = outputs
 
-        # When using Megatron-FSDP, un-shard the parameters for capture.
-        mfsdp_model = None
         param_repr = next(self.base_module.parameters())
         if hasattr(param_repr, "__fsdp_param__"):
-            # Un-shard the module managed by the runner.
-            mfsdp_model = param_repr._megatron_fsdp_model
-            mfsdp_model._replace_param_with_raw_if_needed()
-            mfsdp_model.all_gather_and_wait_parameters_ready(
+            # When using Megatron-FSDP, cache module hooks and
+            # manually un-shard parameters for graph capture.
+            for hook_attr in [
+                "_forward_pre_hooks",
+                "_forward_hooks",
+                "_backward_pre_hooks",
+                "_backward_hooks",
+            ]:
+                self.mfsdp_hook_cache[hook_attr] = getattr(self.base_module, hook_attr, {})
+                setattr(self.base_module, hook_attr, {})
+            self.mfsdp_model = param_repr._megatron_fsdp_model
+            self.mfsdp_model._replace_param_with_raw_if_needed()
+            self.mfsdp_model.all_gather_and_wait_parameters_ready(
                 params=list(self.base_module.parameters()), prefetch=False, bwd=False
             )
 
@@ -865,10 +875,10 @@ class _CudaGraphRunner(torch.nn.Module):
                 buffer_backup.append(buf.clone())
 
             grad_backup = []
-            if mfsdp_model is not None:
+            if self.mfsdp_model is not None:
                 # Snapshot Megatron-FSDP sharded gradient buffers, which can be modified
                 # by the warmup FWD-BWD step prior to partial CG capture.
-                for param_group in mfsdp_model.param_and_grad_buffer.parameter_groups:
+                for param_group in self.mfsdp_model.param_and_grad_buffer.parameter_groups:
                     grad_backup.append(
                         param_group.main_grad_buffer.data.clone()
                         if hasattr(param_group, "main_grad_buffer")
@@ -1077,10 +1087,10 @@ class _CudaGraphRunner(torch.nn.Module):
             if self.fp8_enabled:
                 restore_fp8_tensors([self.base_module], saved_fp8_tensors)
 
-            if mfsdp_model is not None:
+            if self.mfsdp_model is not None:
                 # Restore Megatron-FSDP sharded gradient buffers.
                 for param_group, group_grad in zip(
-                    mfsdp_model.param_and_grad_buffer.parameter_groups, grad_backup
+                    self.mfsdp_model.param_and_grad_buffer.parameter_groups, grad_backup
                 ):
                     if hasattr(param_group, "main_grad_buffer"):
                         param_group.main_grad_buffer.data.copy_(group_grad)
@@ -1094,12 +1104,12 @@ class _CudaGraphRunner(torch.nn.Module):
             for buf_copy, buf in zip(buffer_backup, self.base_module.buffers()):
                 buf.copy_(buf_copy)
 
-        # When using Megatron-FSDP, re-shard the parameters to free memory.
-        if mfsdp_model is not None:
+        if self.mfsdp_model is not None:
+            # When using Megatron-FSDP re-shard parameters to free memory.
             for param in self.base_module.parameters():
-                bucket_id = mfsdp_model.param_and_grad_buffer.param_to_param_group[param]
-                mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=False)
-            mfsdp_model._replace_param_with_distributed_if_needed()
+                bucket_id = self.mfsdp_model.param_and_grad_buffer.param_to_param_group[param]
+                self.mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=False)
+            self.mfsdp_model._replace_param_with_distributed_if_needed()
 
         if is_moe:
             for name, cached_values in cached_aux_losses.items():
@@ -1112,14 +1122,21 @@ class _CudaGraphRunner(torch.nn.Module):
         """Create a bwd cudagraph for this runner. Should be called inside
         'create_cudagraphs()'."""
 
-        # When using Megatron-FSDP, un-shard the parameters for capture.
-        mfsdp_model = None
         param_repr = next(self.base_module.parameters())
         if hasattr(param_repr, "__fsdp_param__"):
-            # Un-shard the module managed by the runner.
-            mfsdp_model = param_repr._megatron_fsdp_model
-            mfsdp_model._replace_param_with_raw_if_needed()
-            mfsdp_model.all_gather_and_wait_parameters_ready(
+            # When using Megatron-FSDP, cache module hooks and
+            # manually un-shard parameters for graph capture.
+            for hook_attr in [
+                "_forward_pre_hooks",
+                "_forward_hooks",
+                "_backward_pre_hooks",
+                "_backward_hooks",
+            ]:
+                self.mfsdp_hook_cache[hook_attr] = getattr(self.base_module, hook_attr, {})
+                setattr(self.base_module, hook_attr, {})
+            self.mfsdp_model = param_repr._megatron_fsdp_model
+            self.mfsdp_model._replace_param_with_raw_if_needed()
+            self.mfsdp_model.all_gather_and_wait_parameters_ready(
                 params=list(self.base_module.parameters()), prefetch=False, bwd=True
             )
 
@@ -1283,12 +1300,12 @@ class _CudaGraphRunner(torch.nn.Module):
             self.static_grad_inputs = tree_map(replace_with_weak_ref, self.static_grad_inputs)
             self.static_grad_outputs = tree_map(replace_with_weak_ref, self.static_grad_outputs)
 
-        # When using Megatron-FSDP, re-shard the parameters to free memory.
-        if mfsdp_model is not None:
+        if self.mfsdp_model is not None:
+            # When using Megatron-FSDP re-shard parameters to free memory.
             for param in self.base_module.parameters():
-                bucket_id = mfsdp_model.param_and_grad_buffer.param_to_param_group[param]
-                mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=True)
-            mfsdp_model._replace_param_with_distributed_if_needed()
+                bucket_id = self.mfsdp_model.param_and_grad_buffer.param_to_param_group[param]
+                self.mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=True)
+            self.mfsdp_model._replace_param_with_distributed_if_needed()
 
         delattr(self, "args")
         delattr(self, "kwargs")
@@ -1703,16 +1720,28 @@ class CudaGraphManager(torch.nn.Module):
             is_in_checkpoint_fwd = is_in_checkpoint_fwd or is_fp8_activation_recompute_enabled()
 
         if _CudagraphGlobalRecord.cudagraph_created:
-            if self.training and torch.is_grad_enabled():
+            # Get GUDA graph runner.
+            runner = self.get_cudagraph_runner(
+                megatron_module, args, kwargs, self.reuse_cudagraphs, cache_key=cache_key
+            )
+            if runner.mfsdp_model is not None:
+                # Trigger Megatron-FSDP pre-forward hooks.
+                for hook in runner.mfsdp_hook_cache["_forward_pre_hooks"]:
+                    res = hook(megatron_module, args, kwargs)
+                    if res is not None:
+                        args, kwargs = res
+            elif self.training and torch.is_grad_enabled():
                 # Trigger Mcore DDP pre-forward hooks
                 self.call_ddp_preforward_hook(megatron_module)
                 for module in megatron_module.modules():
                     self.call_ddp_preforward_hook(module)
-
-            runner = self.get_cudagraph_runner(
-                megatron_module, args, kwargs, self.reuse_cudagraphs, cache_key=cache_key
-            )
             out = runner.replay_graph_capture(self.is_first_microbatch, args, kwargs)
+            if runner.mfsdp_model is not None:
+                # Trigger Megatron-FSDP post-forward hooks.
+                for hook in runner.mfsdp_hook_cache["_forward_hooks"]:
+                    res = hook(megatron_module, args, out)
+                    if res is not None:
+                        out = res
         else:
             if is_inference_mode or self._inline_capture:
                 # Inference generation mode creates graphs immediately

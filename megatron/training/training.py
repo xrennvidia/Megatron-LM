@@ -1927,6 +1927,11 @@ def get_megatron_ddp_config(args: argparse.Namespace) -> DistributedDataParallel
                 # causes an error when we wait() on a CUDA kernel launched in a stream beyond
                 # the scope of the full-iter / FWD-BWD CUDA graph capture.
                 kwargs["fsdp_all_gather_in_start_param_sync"] = False
+            else:
+                # When using partial CUDA graphs, we should use double-buffering to ensure
+                # that BWD replay gradients are installed in a persistent buffer.
+                kwargs["fsdp_double_buffer"] = True
+                kwargs["fsdp_db_use_persist_buf_on_alloc_fail"] = True
 
         return DistributedDataParallelConfig(**kwargs)
 
