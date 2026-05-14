@@ -12,7 +12,7 @@ mkdir -p "$(dirname "$NSYS_PROFILE_PATH")"
 mkdir -p "$(dirname "$TENSORBOARD_LOGS_PATH")"
 
 # Distributed training setup
-GPUS_PER_NODE=4
+GPUS_PER_NODE=8
 NUM_NODES=1
 MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
@@ -136,7 +136,7 @@ if [ "${USE_MEGATRON_FSDP}" = 1 ]; then
         --ckpt-format fsdp_dtensor
         --grad-reduce-in-bf16   # Will be deprecated soon!
         # --use-nccl-ub  # disabled: NCCL user buffers don't work with --expert-model-parallel-size > 1
-        # --fsdp-double-buffer
+        # --fsdp-double-buffer  # Required only for partial CG in Megatron (local).
         # --fsdp-manual-registration  # disabled: requires --use-nccl-ub (asserted in arguments.py:1058)
         # To enable HFSDP, DP full-sharding of the optimizer state with
         # hierarchical data parallelism (DP-Outer=2, DP-Inner=DP//2)...
@@ -148,9 +148,6 @@ if [ "${USE_MEGATRON_FSDP}" = 1 ]; then
         # --megatron-fsdp-grad-comm-dtype auto
         # To use decoupled (mixed-precision) gradients...
         # --use-precision-aware-optimizer
-        # To use full-iteration CUDA graphs with Megatron-FSDP...
-        # --cuda-graph-impl local
-        # --cuda-graph-scope full_iteration
     )
 fi
 
