@@ -12,7 +12,7 @@ mkdir -p "$(dirname "$NSYS_PROFILE_PATH")"
 mkdir -p "$(dirname "$TENSORBOARD_LOGS_PATH")"
 
 # Distributed training setup
-GPUS_PER_NODE=8
+GPUS_PER_NODE=4
 NUM_NODES=1
 MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
