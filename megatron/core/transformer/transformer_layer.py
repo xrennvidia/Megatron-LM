@@ -1343,6 +1343,15 @@ class MoETransformerLayer(TransformerLayer):
 
         super().__init__(*args, **kwargs)
 
+        # Partial-scope cudagraphs need self.mlp and other submodules, which
+        # do not exist yet when create_mcore_cudagraph_manager runs from
+        # MegatronModule.__init__. Defer the transition until submodules are built.
+        if self.config.cuda_graph_impl == "local" and self.config.cuda_graph_scope and (
+            CudaGraphScope.moe_router in self.config.cuda_graph_scope
+            or CudaGraphScope.moe_preprocess in self.config.cuda_graph_scope
+        ):
+            self.transition_cudagraph_scope('partial')
+
     def _should_call_local_cudagraph(self, *args, **kwargs):
         """
         Controls whether the full-layer cudagraph_manager captures the entire forward call
@@ -1381,13 +1390,57 @@ class MoETransformerLayer(TransformerLayer):
             )
             if not hasattr(self, '_router_dtoh_event'):
                 self._router_dtoh_event = torch.cuda.Event()
+            # Hardcoded eviction sets for fine-grained mfsdp hooks. Each list
+            # is the set of submodules whose `__call__` is invoked by the
+            # corresponding captured method, expanded to include all their
+            # descendants (since fine-grained mfsdp registers a recurse=False
+            # pre-forward hook on every module). Modules invoked in BOTH
+            # captured methods AND the eager expert-compute path (notably
+            # `self.mlp` itself) are intentionally excluded so the eager
+            # path keeps firing their hooks normally; the cost is that those
+            # top-level hooks remain captured into the cudagraphs, but for
+            # MoELayer their direct params are typically empty so it's a
+            # no-op.
+            def _subtree_modules(*roots):
+                seen: set = set()
+                out: list = []
+                for root in roots:
+                    if not isinstance(root, torch.nn.Module):
+                        continue
+                    for m in root.modules():
+                        if id(m) in seen:
+                            continue
+                        seen.add(id(m))
+                        out.append(m)
+                return out
+
+            # All roots use getattr(..., None) since they may be absent on
+            # some configurations (e.g. IdentityOp not assigned, MLP variants
+            # without a router/shared_experts/fc2_latent_proj). `_subtree_modules`
+            # safely skips non-Module entries.
+            router_hook_modules = _subtree_modules(
+                getattr(self, 'pre_mlp_layernorm', None),
+                getattr(self.mlp, 'router', None),
+                getattr(self.mlp, 'shared_experts', None),
+            )
+            postprocess_hook_modules = _subtree_modules(
+                getattr(self.mlp, 'fc2_latent_proj', None),
+                getattr(self, 'mlp_bda', None),
+            )
+
             if not hasattr(self, 'cudagraph_manager_router'):
                 self.cudagraph_manager_router = CudaGraphManager(
-                    self.config, self, function_name="_forward_mlp_router"
+                    self.config,
+                    self,
+                    function_name="_forward_mlp_router",
+                    hook_modules=router_hook_modules,
                 )
             if not hasattr(self, 'cudagraph_manager_postprocess'):
                 self.cudagraph_manager_postprocess = CudaGraphManager(
-                    self.config, self, function_name="_forward_mlp_postprocess"
+                    self.config,
+                    self,
+                    function_name="_forward_mlp_postprocess",
+                    hook_modules=postprocess_hook_modules,
                 )
         elif mode == 'full':
             self.use_partial_cudagraphs = False
@@ -1413,11 +1466,9 @@ class MoETransformerLayer(TransformerLayer):
 
         if not self.config.cuda_graph_scope or CudaGraphScope.moe in self.config.cuda_graph_scope:
             self.cudagraph_manager = CudaGraphManager(config)
-        elif (
-            CudaGraphScope.moe_router in self.config.cuda_graph_scope
-            or CudaGraphScope.moe_preprocess in self.config.cuda_graph_scope
-        ):
-            self.transition_cudagraph_scope('partial')
+        # Partial-scope setup (moe_router / moe_preprocess) is deferred to the
+        # end of MoETransformerLayer.__init__, since it needs self.mlp and other
+        # submodules that are not yet built at this point.
 
     def _resolve_token_dispatcher_attr(self, attr_name: str) -> tuple[Any, str]:
         parent_attr_name, _, leaf_attr_name = attr_name.rpartition('.')

@@ -22,7 +22,7 @@ export NCCL_NVLS_ENABLE=0
 export NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN=2
 export USE_MNNVL=1
 
-MEGATRON_LM_DIR="/opt/megatron-lm"
+MEGATRON_LM_DIR="/opt/Megatron-LM"
 PERF_OPT_DIR="${MEGATRON_LM_DIR}/xren_debug/perf"
 OUTPUT_ROOT="${MEGATRON_LM_DIR}/xren_debug"
 ########################################################
@@ -201,9 +201,10 @@ options=" \
         --cross-entropy-loss-fusion \
         --cross-entropy-fusion-impl native \
         --enable-cuda-graph \
-        --cuda-graph-scope mamba attn moe_router \
+        --cuda-graph-scope mamba moe_router \
         --te-rng-tracker \
         --exit-interval 5"
+        #--cuda-graph-scope mamba attn moe_router
         #--per-split-data-args-path ${BLEND_PATH} \
         #--save ${CHECKPOINT_DIR} \
         #--load ${CHECKPOINT_DIR} \
