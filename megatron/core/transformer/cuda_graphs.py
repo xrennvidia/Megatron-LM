@@ -15,7 +15,7 @@ from enum import Enum
 from functools import partial
 from itertools import chain, zip_longest
 from math import ceil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import torch
 from torch.utils._pytree import tree_map as tree_map_pyt
@@ -104,6 +104,16 @@ try:
         FREEZE_GC = False
 except ImportError:
     pass
+
+
+# Sentinel attribute name used by `_CudaGraphRunner._evict_hooks_for_capture`
+# to share an evicted hook snapshot across multiple runners that target the
+# same `nn.Module` (e.g. router and postprocess managers both listing
+# `self.mlp` in their `hook_modules`). The first runner to evict snapshots
+# the original hook dicts and stashes them under this attribute on the live
+# module; subsequent runners read from the sentinel instead of from the now
+# empty hook dicts on the module.
+_CUDAGRAPH_EVICTED_HOOKS_ATTR = "_mcore_cudagraph_evicted_hooks"
 
 
 def is_graph_capturing():
@@ -533,13 +543,25 @@ def create_cudagraphs():
 def delete_cuda_graphs():
     """Delete all CUDA graphs."""
 
-    # Reset runners.
+    # Reset runners and restore any hooks that were evicted from base modules
+    # so the modules can be re-used or re-graphed afterwards.
+    restored_modules: set = set()
     for record in [
         *_CudagraphGlobalRecord.cudagraph_record,
         *_CudagraphGlobalRecord.cudagraph_inference_record,
     ]:
         runner = record[0]
         assert isinstance(runner, _CudaGraphRunner)
+
+        for mod, attr_to_hooks in runner.mfsdp_hook_cache:
+            if id(mod) in restored_modules:
+                continue
+            for hook_attr, original in attr_to_hooks.items():
+                setattr(mod, hook_attr, original)
+            if hasattr(mod, _CUDAGRAPH_EVICTED_HOOKS_ATTR):
+                delattr(mod, _CUDAGRAPH_EVICTED_HOOKS_ATTR)
+            restored_modules.add(id(mod))
+        runner.mfsdp_hook_cache = []
 
         runner.cudagraph_created = False
         runner.fwd_graph_recorded = False
@@ -722,15 +744,24 @@ class _CudaGraphRunner(torch.nn.Module):
         fwd_graph_input_kwargs: Dict[str, Any],
         func,
         need_backward,
+        hook_modules=(),
     ):
         """Creates a _CudaGraphRunner, which holds a single pair of fwd and bwd cudagraphs, which
         are not created until this runner records its graph creation into
-        '_CudagraphGlobalRecord', and 'create_cudagraphs()' is called."""
+        '_CudagraphGlobalRecord', and 'create_cudagraphs()' is called.
+
+        Args:
+            hook_modules: Iterable of modules whose `_forward_*_hooks` and
+                `_backward_*_hooks` should be evicted at capture time and
+                re-fired manually around each replay. See `CudaGraphManager`
+                for the rationale.
+        """
 
         super().__init__()
 
         self.base_module = base_module
         self.mempool = mempool
+        self.hook_modules = tuple(hook_modules)
 
         self.fwd_graph_input_arg_metas = [ArgMetadata(a) for a in fwd_graph_input_args]
         self.fwd_graph_input_kwarg_metas = {
@@ -761,7 +792,12 @@ class _CudaGraphRunner(torch.nn.Module):
         )
 
         self.mfsdp_model = None
-        self.mfsdp_hook_cache = {}
+        # List of (module, {hook_attr: original_hook_dict}) tuples populated by
+        # `create_fwd_graph` / `create_bwd_graph` when a runner needs to evict
+        # hooks from one or more modules around capture so they don't get baked
+        # into the cudagraph. Order is preserved from `self.hook_modules` so
+        # pre-hooks fire in module order and post-hooks fire in reverse order.
+        self.mfsdp_hook_cache: List[Tuple[torch.nn.Module, Dict[str, Dict]]] = []
 
         # We use this attribute to record the value of 'is_first_microbatch' each fwd cudagraph
         # replay so that way we only update the value of this flag in FP8GlobalStateManager when
@@ -834,6 +870,58 @@ class _CudaGraphRunner(torch.nn.Module):
         # Return module params that were found in the graph, preserving original order
         return tuple(p for p in self.base_module.parameters() if id(p) in p_ids)
 
+    def _evict_hooks_for_capture(self):
+        """Move PyTorch hooks for every module in `self.hook_modules` into
+        `self.mfsdp_hook_cache` and replace the module-side dicts with empty
+        ones of the same kind.
+
+        The cache is structured as a list of `(module, {hook_attr: hook_dict})`
+        tuples. The list mirrors `self.hook_modules` order so the manager can
+        re-fire pre-hooks in module order and post-hooks in reverse module
+        order around the cudagraph replay. We snapshot the module's hook
+        dicts and immediately install empty replacements so that whatever
+        runs inside `torch.cuda.graph(...)` does not see them and therefore
+        does not bake their kernels into the cudagraph.
+
+        For modules that have already been evicted by another runner on the
+        same `base_module` (e.g. a router runner evicting `self.mlp` before
+        a postprocess runner gets here), we read the original hook dicts
+        from a per-module sentinel attribute installed by the first runner,
+        so all sharing runners' caches reference the same hooks and the
+        eviction is performed only once on the live module.
+
+        This method is idempotent across the fwd and bwd capture for the
+        same runner: subsequent calls find an already-populated cache and
+        return early, preserving the original hook snapshot from the first
+        capture (the modules' dicts are already empty by then).
+        """
+        if self.mfsdp_hook_cache:
+            return
+        HOOK_ATTRS = (
+            "_forward_pre_hooks",
+            "_forward_hooks",
+            "_backward_pre_hooks",
+            "_backward_hooks",
+        )
+        for mod in self.hook_modules:
+            shared = getattr(mod, _CUDAGRAPH_EVICTED_HOOKS_ATTR, None)
+            if shared is not None:
+                # Another runner already evicted this module; reuse its
+                # snapshot so all runners see the same hooks.
+                attr_to_hooks = shared
+            else:
+                attr_to_hooks = {}
+                for hook_attr in HOOK_ATTRS:
+                    original = getattr(mod, hook_attr, None)
+                    if original is None:
+                        continue
+                    attr_to_hooks[hook_attr] = original
+                    # Use the same dict subclass (e.g. OrderedDict) for the empty
+                    # replacement to preserve PyTorch's hook iteration semantics.
+                    setattr(mod, hook_attr, type(original)())
+                setattr(mod, _CUDAGRAPH_EVICTED_HOOKS_ATTR, attr_to_hooks)
+            self.mfsdp_hook_cache.append((mod, attr_to_hooks))
+
     def create_fwd_graph(self, args, kwargs, outputs=None, clone_inputs=True):
         """Create a fwd cudagraph for this runner. Should be called inside
         'create_cudagraphs()'."""
@@ -846,20 +934,20 @@ class _CudaGraphRunner(torch.nn.Module):
 
         param_repr = next(self.base_module.parameters())
         if hasattr(param_repr, "__fsdp_param__"):
-            # When using Megatron-FSDP, cache module hooks and
-            # manually un-shard parameters for graph capture.
-            for hook_attr in [
-                "_forward_pre_hooks",
-                "_forward_hooks",
-                "_backward_pre_hooks",
-                "_backward_hooks",
-            ]:
-                self.mfsdp_hook_cache[hook_attr] = getattr(self.base_module, hook_attr, {})
-                setattr(self.base_module, hook_attr, {})
+            # When using Megatron-FSDP, cache hooks for each declared hook module
+            # and manually un-shard parameters for graph capture. Eviction is
+            # scoped to `self.hook_modules` so that, for example, partial-MoE
+            # managers that wrap a method on `base_module` do not erase the
+            # `MoETransformerLayer`'s own hooks (those are still owned by the
+            # outer `nn.Module.__call__` wrapping the whole layer).
+            self._evict_hooks_for_capture()
             self.mfsdp_model = param_repr._megatron_fsdp_model
             self.mfsdp_model._replace_param_with_raw_if_needed()
             self.mfsdp_model.all_gather_and_wait_parameters_ready(
                 params=list(self.base_module.parameters()), prefetch=False, bwd=False
+            )
+            self.mfsdp_model.all_gather_and_wait_parameters_ready(
+                params=list(self.base_module.parameters()), prefetch=False, bwd=True
             )
 
         # Save buffers, grads, and other variables that may be affected by graph warmup.
@@ -1109,6 +1197,7 @@ class _CudaGraphRunner(torch.nn.Module):
             for param in self.base_module.parameters():
                 bucket_id = self.mfsdp_model.param_and_grad_buffer.param_to_param_group[param]
                 self.mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=False)
+                self.mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=True)
             self.mfsdp_model._replace_param_with_distributed_if_needed()
 
         if is_moe:
@@ -1124,16 +1213,10 @@ class _CudaGraphRunner(torch.nn.Module):
 
         param_repr = next(self.base_module.parameters())
         if hasattr(param_repr, "__fsdp_param__"):
-            # When using Megatron-FSDP, cache module hooks and
-            # manually un-shard parameters for graph capture.
-            for hook_attr in [
-                "_forward_pre_hooks",
-                "_forward_hooks",
-                "_backward_pre_hooks",
-                "_backward_hooks",
-            ]:
-                self.mfsdp_hook_cache[hook_attr] = getattr(self.base_module, hook_attr, {})
-                setattr(self.base_module, hook_attr, {})
+            # When using Megatron-FSDP, cache hooks for each declared hook
+            # module and manually un-shard parameters for bwd graph capture.
+            # See `create_fwd_graph` for details on per-module scoping.
+            self._evict_hooks_for_capture()
             self.mfsdp_model = param_repr._megatron_fsdp_model
             self.mfsdp_model._replace_param_with_raw_if_needed()
             self.mfsdp_model.all_gather_and_wait_parameters_ready(
@@ -1540,6 +1623,7 @@ class CudaGraphManager(torch.nn.Module):
         pg_collection=None,
         inline_capture=False,
         num_warmup_steps=None,
+        hook_modules=None,
     ):
         super().__init__()
         """Creates a CudaGraphManager to manage CUDA graphs for a Megatron module.
@@ -1551,6 +1635,26 @@ class CudaGraphManager(torch.nn.Module):
                 `inference_context` is present in the kwargs of the forward call.
                 Setting this argument to True always forces the inline capture path to be taken.
             num_warmup_steps: If set, overrides the per-runner warmup step count.
+            hook_modules: Iterable of `nn.Module`s whose `_forward_*_hooks` and
+                `_backward_*_hooks` should be evicted before each cudagraph capture
+                and re-fired manually around each replay. Used by Megatron-FSDP to
+                keep parameter all-gather/release hooks out of the captured graph.
+                When `function_name is None` (capturing the full `__call__`) and
+                `hook_modules` is left unset, the default is resolved lazily in
+                `get_cudagraph_runner` to `list(megatron_module.modules())` (the
+                calling module plus all descendants) — fine-grained Megatron-FSDP
+                registers `recurse=False` pre-hooks on every submodule, and all of
+                those fire inside the captured graph during full-`__call__` capture,
+                so they must all be evicted. Resolution is deferred to call time so
+                callers like `MambaLayer` / `TransformerLayer` can register the
+                manager from `GraphableMegatronModule.__init__` before their
+                submodules exist. When `function_name` is provided, the default is
+                `[]` because a method-name capture does not invoke
+                `base_module.__call__` and so `base_module`'s own hooks are not
+                auto-fired during capture. Callers wrapping a method via
+                `function_name` may pass a custom list of submodules whose hooks
+                should be lifted out of the graph (e.g. fine-grained per-submodule
+                mfsdp pre-hooks).
         """
         self._inline_capture = inline_capture
         self._num_warmup_steps = num_warmup_steps
@@ -1576,6 +1680,25 @@ class CudaGraphManager(torch.nn.Module):
         else:
             func = None
         self.func = func
+
+        # Hooks to evict and manually re-fire around each cudagraph replay.
+        # For full-`__call__` capture (function_name is None) we default to
+        # evicting on the calling module AND all its descendants, since
+        # fine-grained Megatron-FSDP registers a `recurse=False` pre-forward
+        # hook on every submodule and all of those fire inside the captured
+        # graph at their respective `__call__` sites. The descendant subtree
+        # is only known at call time (submodules may not be built yet when
+        # `GraphableMegatronModule.__init__` invokes us), so leave
+        # `self.hook_modules` as None here and resolve it in
+        # `get_cudagraph_runner` on the first call. A method-name capture
+        # does not auto-fire the layer's own hooks via PyTorch and so does
+        # not need eviction unless the caller explicitly opts in.
+        if hook_modules is not None:
+            self.hook_modules = list(hook_modules)
+        elif function_name is not None:
+            self.hook_modules = []
+        else:
+            self.hook_modules = None
 
         # need to delay the import here to avoid a circular import
         global HAVE_TE_GRAPHS
@@ -1634,6 +1757,16 @@ class CudaGraphManager(torch.nn.Module):
         length of 'self.cudagraph_runners'.
         Otherwise, we assign a mempool per microbatch, which allows cudagraphs to be reused
         over different microbatches by tracking their respective fwd and bwd passes.'''
+        # Resolve the deferred default for full-`__call__` capture: evict
+        # hooks on the calling module and every descendant, so fine-grained
+        # Megatron-FSDP per-submodule pre/post-forward hooks are lifted out
+        # of the captured graph and manually re-fired around each replay in
+        # depth-first / call order (pre-hooks forward, post-hooks reversed).
+        # Done here (rather than in `__init__`) so callers like `MambaLayer`
+        # and `TransformerLayer` can register the manager from
+        # `GraphableMegatronModule.__init__` before their submodules exist.
+        if self.hook_modules is None:
+            self.hook_modules = list(megatron_module.modules())
         if reuse_cudagraphs:
             if cache_key is not None:
                 runner = self.custom_cudagraphs_lookup_table[cache_key]
@@ -1669,6 +1802,7 @@ class CudaGraphManager(torch.nn.Module):
                         kwargs,
                         self.func,
                         self.need_backward,
+                        hook_modules=self.hook_modules,
                     )
                     if self._num_warmup_steps is not None:
                         runner.num_warmup_steps = self._num_warmup_steps
@@ -1689,6 +1823,7 @@ class CudaGraphManager(torch.nn.Module):
                     kwargs,
                     self.func,
                     self.need_backward,
+                    hook_modules=self.hook_modules,
                 )
                 self.cudagraph_runners.append(runner)
 
@@ -1724,24 +1859,37 @@ class CudaGraphManager(torch.nn.Module):
             runner = self.get_cudagraph_runner(
                 megatron_module, args, kwargs, self.reuse_cudagraphs, cache_key=cache_key
             )
+
+            # Pre-forward hooks.
             if runner.mfsdp_model is not None:
-                # Trigger Megatron-FSDP pre-forward hooks.
-                for hook in runner.mfsdp_hook_cache["_forward_pre_hooks"]:
-                    res = hook(megatron_module, args, kwargs)
-                    if res is not None:
-                        args, kwargs = res
+                # Trigger Megatron-FSDP pre-forward hooks for each evicted
+                # module, in the order they appear in `hook_modules`. Each
+                # hook is called with its own owning module so behavior
+                # matches what PyTorch would have done before eviction.
+                for mod, attr_to_hooks in runner.mfsdp_hook_cache:
+                    for hook in attr_to_hooks.get("_forward_pre_hooks", {}).values():
+                        res = hook(mod, args, kwargs)
+                        if res is not None:
+                            args, kwargs = res
             elif self.training and torch.is_grad_enabled():
                 # Trigger Mcore DDP pre-forward hooks
                 self.call_ddp_preforward_hook(megatron_module)
                 for module in megatron_module.modules():
                     self.call_ddp_preforward_hook(module)
+
+            # Replay graph capture.
             out = runner.replay_graph_capture(self.is_first_microbatch, args, kwargs)
+
+            # Post-forward hooks.
             if runner.mfsdp_model is not None:
-                # Trigger Megatron-FSDP post-forward hooks.
-                for hook in runner.mfsdp_hook_cache["_forward_hooks"]:
-                    res = hook(megatron_module, args, out)
-                    if res is not None:
-                        out = res
+                # Trigger Megatron-FSDP post-forward hooks in reverse module
+                # order so post-hooks unwind opposite to pre-hooks.
+                # Generally only the FSDP unit has a post-forward hook.
+                for mod, attr_to_hooks in reversed(runner.mfsdp_hook_cache):
+                    for hook in attr_to_hooks.get("_forward_hooks", {}).values():
+                        res = hook(mod, args, out)
+                        if res is not None:
+                            out = res
         else:
             if is_inference_mode or self._inline_capture:
                 # Inference generation mode creates graphs immediately
@@ -1789,8 +1937,30 @@ class CudaGraphManager(torch.nn.Module):
                         (runner, "fwd", args, kwargs)
                     )
 
+                # Pre-forward hooks.
+                if runner.mfsdp_model is not None:
+                    # Trigger Megatron-FSDP pre-forward hooks for each evicted
+                    # module, in the order they appear in `hook_modules`. Each
+                    # hook is called with its own owning module so behavior
+                    # matches what PyTorch would have done before eviction.
+                    for mod, attr_to_hooks in runner.mfsdp_hook_cache:
+                        for hook in attr_to_hooks.get("_forward_pre_hooks", {}).values():
+                            res = hook(mod, args, kwargs)
+                            if res is not None:
+                                args, kwargs = res
+
                 # Now replay the graph
                 out = runner.replay_graph_capture(self.is_first_microbatch, args, kwargs)
+
+                # Post-forward hooks.
+                if runner.mfsdp_model is not None:
+                    # Trigger Megatron-FSDP post-forward hooks in reverse module
+                    # order so post-hooks unwind opposite to pre-hooks.
+                    for mod, attr_to_hooks in reversed(runner.mfsdp_hook_cache):
+                        for hook in attr_to_hooks.get("_forward_hooks", {}).values():
+                            res = hook(mod, args, out)
+                            if res is not None:
+                                out = res
             elif self.training or is_in_checkpoint_fwd:
                 runner = self.get_cudagraph_runner(
                     megatron_module, args, kwargs, self.reuse_cudagraphs
