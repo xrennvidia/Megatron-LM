@@ -2134,6 +2134,8 @@ class ParamAndGradBuffer:
                 name="fsdp_fp8_transpose_params",
                 fsdp_param_groups=self.parameter_groups,
                 size=UB_BUFFER_NUM,
+                # Partial CUDA graphs capture MXFP8 transpose buffer addresses in backward.
+                # If a unit does not fit the fixed pool, keep fallback storage persistent too.
                 fallback_to_persistent_buffer=self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail,
             )
             self.main_grad_alloc = FixedPoolAllocator(
