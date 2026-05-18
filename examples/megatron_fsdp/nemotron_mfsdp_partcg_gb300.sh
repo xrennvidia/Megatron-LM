@@ -201,7 +201,7 @@ options=" \
         --cross-entropy-loss-fusion \
         --cross-entropy-fusion-impl native \
         --enable-cuda-graph \
-        --cuda-graph-scope mamba moe_router \
+        --cuda-graph-scope mamba attn moe_router \
         --te-rng-tracker \
         --exit-interval 5"
         #--cuda-graph-scope mamba attn moe_router
