@@ -1346,9 +1346,13 @@ class MoETransformerLayer(TransformerLayer):
         # Partial-scope cudagraphs need self.mlp and other submodules, which
         # do not exist yet when create_mcore_cudagraph_manager runs from
         # MegatronModule.__init__. Defer the transition until submodules are built.
-        if self.config.cuda_graph_impl == "local" and self.config.cuda_graph_scope and (
-            CudaGraphScope.moe_router in self.config.cuda_graph_scope
-            or CudaGraphScope.moe_preprocess in self.config.cuda_graph_scope
+        if (
+            self.config.cuda_graph_impl == "local"
+            and self.config.cuda_graph_scope
+            and (
+                CudaGraphScope.moe_router in self.config.cuda_graph_scope
+                or CudaGraphScope.moe_preprocess in self.config.cuda_graph_scope
+            )
         ):
             self.transition_cudagraph_scope('partial')
 
@@ -1390,6 +1394,7 @@ class MoETransformerLayer(TransformerLayer):
             )
             if not hasattr(self, '_router_dtoh_event'):
                 self._router_dtoh_event = torch.cuda.Event()
+
             # Hardcoded eviction sets for fine-grained mfsdp hooks. Each list
             # is the set of submodules whose `__call__` is invoked by the
             # corresponding captured method, expanded to include all their
@@ -1424,8 +1429,7 @@ class MoETransformerLayer(TransformerLayer):
                 getattr(self.mlp, 'shared_experts', None),
             )
             postprocess_hook_modules = _subtree_modules(
-                getattr(self.mlp, 'fc2_latent_proj', None),
-                getattr(self, 'mlp_bda', None),
+                getattr(self.mlp, 'fc2_latent_proj', None), getattr(self, 'mlp_bda', None)
             )
 
             if not hasattr(self, 'cudagraph_manager_router'):

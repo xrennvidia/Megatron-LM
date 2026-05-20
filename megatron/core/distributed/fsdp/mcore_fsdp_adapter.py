@@ -40,9 +40,7 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.distributed.data_parallel_base import _BaseDataParallel
 from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.ssm.mamba_layer import MambaLayer
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.transformer_layer import MoETransformerLayer, TransformerLayer
 from megatron.core.utils import is_te_min_version, log_single_rank
 
 try:
@@ -151,8 +149,21 @@ class FullyShardedDataParallel(_BaseDataParallel):
         if fsdp_unit_modules is not None:
             self.fsdp_unit_modules = fsdp_unit_modules
         else:
+            # Default Megatron-FSDP unit modules.
+            from megatron.core.ssm.mamba_layer import MambaLayer
+            from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
+            from megatron.core.transformer.transformer_layer import (
+                MoETransformerLayer,
+                TransformerLayer,
+            )
+
             if self.ddp_config.data_parallel_sharding_strategy == "optim_grads_params":
-                self.fsdp_unit_modules = [TransformerLayer, MoETransformerLayer, MambaLayer]
+                self.fsdp_unit_modules = [
+                    TransformerLayer,
+                    MoETransformerLayer,
+                    MambaLayer,
+                    MultiTokenPredictionLayer,
+                ]
             else:
                 self.fsdp_unit_modules = []
 
