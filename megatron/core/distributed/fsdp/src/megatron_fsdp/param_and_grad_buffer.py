@@ -2415,9 +2415,10 @@ class ParamAndGradBuffer:
                 fsdp_param_groups=self.parameter_groups,
                 size=UB_BUFFER_NUM,
                 dtype_attr="grad_dtype",
-                fallback_to_persistent_buffer=(
-                    self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
-                ),
+                # TODO(@cspades): Why do gradients need a persistent buffer?
+                # fallback_to_persistent_buffer=(
+                #     self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                # ),
             )
             if self.dist_index.use_hybrid_fsdp:
                 # Only required for custom communication dtype buffer allocation
@@ -2429,9 +2430,10 @@ class ParamAndGradBuffer:
                     fsdp_param_groups=self.parameter_groups,
                     size=UB_BUFFER_NUM,
                     dtype_attr="grad_dtype",
-                    fallback_to_persistent_buffer=(
-                        self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
-                    ),
+                    # TODO(@cspades): Why do gradients need a persistent buffer?
+                    # fallback_to_persistent_buffer=(
+                    #     self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                    # ),
                 )
             self.double_buf_units = self.weight_alloc.fsdp_double_buffer_units
         else:
