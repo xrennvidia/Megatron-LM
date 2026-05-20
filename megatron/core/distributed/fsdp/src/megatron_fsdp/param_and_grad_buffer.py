@@ -916,7 +916,7 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
         """
         # For every FSDP unit, track the size of every bucket of every dtype to
         # construct the maximum number of buckets of maximum size for each dtype.
-
+        dtype_max_bucket_id = {}
         for fsdp_unit_id, fsdp_unit_bucket_ids in self.fsdp_unit_buckets.items():
             unit_dtype_bucket_sizes = {}
             for bucket_id in fsdp_unit_bucket_ids:
@@ -937,23 +937,45 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
                     # Map to actual dtype, which is uint8.
                     dtype = torch.uint8
                 max_bucket_sizes = self.max_dtype_bucket_sizes.setdefault(dtype, [])
+                max_bucket_ids = dtype_max_bucket_id.setdefault(dtype, [])
                 # If more buckets are needed for this unit, extend the pool with 0's.
                 if len(bucket_sizes) > len(max_bucket_sizes):
-                    max_bucket_sizes.extend([0] * (len(bucket_sizes) - len(max_bucket_sizes)))
+                    extend_len = len(bucket_sizes) - len(max_bucket_sizes)
+                    max_bucket_sizes.extend([0] * extend_len)
+                    max_bucket_ids.extend([-1] * extend_len)
                 # Update maximum bucket pool from smallest to largest.
                 # Assign FSDP unit bucket ID's to the pool, as subsequent units
                 # can only increase the length and bucket sizes of the offsets
                 # registered to this dtype in the pool.
-                for bucket_offset, (bucket_size_id, max_offset_size) in enumerate(
-                    zip(bucket_sizes, max_bucket_sizes)
+                for bucket_size_id, (bucket_offset, max_offset_size) in zip(
+                    bucket_sizes,
+                    sorted(enumerate(max_bucket_sizes), key=lambda x: x[1])[
+                        # Find the largest buckets we have in the pool that
+                        # can support this entire FSDP unit.
+                        len(max_bucket_sizes) - len(bucket_sizes):
+                    ]
                 ):
                     # Update max bucket size at this offset.
                     bucket_size, bucket_id = bucket_size_id
                     if bucket_size > max_offset_size:
                         max_bucket_sizes[bucket_offset] = bucket_size
+                        # Track which bucket IDs define the maxima.
+                        max_bucket_ids[bucket_offset] = (fsdp_unit_id, bucket_id)
                     # Assign bucket ID to this offset for this dtype,
                     # to recycle the appropriate buffer.
                     self.bucket_alloc_index[bucket_id] = bucket_offset
+
+        # Log the max pool bucket sizes and bucket IDs responsible.
+        if torch.distributed.get_rank() == 0:
+            for dtype, bucket_sizes in self.max_dtype_bucket_sizes.items():
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    (
+                        f"[MaxPoolAllocator][{self.name}][Buffers={self.size}][{dtype}] \n"
+                        f"\tBucket Sizes: {bucket_sizes} / Max (Unit, Bucket): {max_bucket_ids}"
+                    ),
+                )
 
     def allocate(
         self,

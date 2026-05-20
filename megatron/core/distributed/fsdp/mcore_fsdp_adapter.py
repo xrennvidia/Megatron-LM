@@ -151,19 +151,13 @@ class FullyShardedDataParallel(_BaseDataParallel):
         else:
             # Default Megatron-FSDP unit modules.
             from megatron.core.ssm.mamba_layer import MambaLayer
-            from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
             from megatron.core.transformer.transformer_layer import (
                 MoETransformerLayer,
                 TransformerLayer,
             )
 
             if self.ddp_config.data_parallel_sharding_strategy == "optim_grads_params":
-                self.fsdp_unit_modules = [
-                    TransformerLayer,
-                    MoETransformerLayer,
-                    MambaLayer,
-                    MultiTokenPredictionLayer,
-                ]
+                self.fsdp_unit_modules = [TransformerLayer, MoETransformerLayer, MambaLayer]
             else:
                 self.fsdp_unit_modules = []
 
