@@ -243,18 +243,21 @@ fsdp_options=" \
     --ckpt-format fsdp_dtensor \
     --megatron-fsdp-grad-comm-dtype bf16 \
     --megatron-fsdp-main-params-dtype fp32 \
-    --megatron-fsdp-main-grads-dtype bf16"
+    --megatron-fsdp-main-grads-dtype bf16 \
+    --fsdp-double-buffer \
+    --megatron-fsdp-max-pool-double-buffer"
     #--use-nccl-ub \
     #--use-sharp \
 
 profile_options=" \
     --profile \
-    --profile-step-start 225 \
-    --profile-step-end 227 \
-    --profile-ranks 0"
-    #--memory-snapshot-path ${RUN_DIR}/${NAME}_node${SLURM_NODEID}_rank${SLURM_PROCID}.pickle \
+    --profile-step-start 3 \
+    --profile-step-end 4 \
+    --profile-ranks 0 \
+    --record-memory-history \
+    --memory-snapshot-path ${RUN_DIR}/${NAME}_node${SLURM_NODEID}_rank${SLURM_PROCID}.pickle"
 
 #nsys_cmd="nsys profile -s none -t nvtx,cuda-sw -o ${RUN_DIR}/${NAME}_node${SLURM_NODEID}_rank${SLURM_PROCID} --force-overwrite true --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=stop"
-run_cmd="torchrun --nproc_per_node 4 --nnodes 1 --log-dir ${LOGS_DIR}/${NAME}.log ${MEGATRON_LM_DIR}/pretrain_mamba.py ${options} ${mxfp8_options} ${mtp_options} ${fsdp_options}"
+run_cmd="torchrun --nproc_per_node 4 --nnodes 1 --log-dir ${LOGS_DIR}/${NAME}.log ${MEGATRON_LM_DIR}/pretrain_mamba.py ${options} ${mxfp8_options} ${mtp_options} ${fsdp_options} ${profile_options}"
 
 sh -c "${run_cmd}"
