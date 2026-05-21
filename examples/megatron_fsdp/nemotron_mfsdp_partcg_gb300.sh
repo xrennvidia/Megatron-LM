@@ -191,6 +191,7 @@ options=" \
         --log-params-norm \
         --log-num-zeros-in-grad \
         --log-throughput \
+        --log-device-memory-used \
         --eval-interval 5 \
         --eval-iters 14 \
         --bf16 \
