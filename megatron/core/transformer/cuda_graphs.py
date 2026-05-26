@@ -1174,6 +1174,7 @@ class _CudaGraphRunner(torch.nn.Module):
                 bucket_id = self.mfsdp_model.param_and_grad_buffer.param_to_param_group[param]
                 self.mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=False)
                 self.mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=True)
+                self.mfsdp_model.grad_reduce_pipeline.reset()
             self.mfsdp_model._replace_param_with_distributed_if_needed()
 
         if is_moe:
@@ -1361,6 +1362,7 @@ class _CudaGraphRunner(torch.nn.Module):
             for param in self.base_module.parameters():
                 bucket_id = self.mfsdp_model.param_and_grad_buffer.param_to_param_group[param]
                 self.mfsdp_model.all_gather_pipeline.release_bucket(bucket_id, bwd=True)
+                self.mfsdp_model.grad_reduce_pipeline.reset()
             self.mfsdp_model._replace_param_with_distributed_if_needed()
 
         delattr(self, "args")
