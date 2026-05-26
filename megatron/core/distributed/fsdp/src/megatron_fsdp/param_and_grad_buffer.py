@@ -968,6 +968,7 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
         # Log the max pool bucket sizes and bucket IDs responsible.
         if torch.distributed.get_rank() == 0:
             for dtype, bucket_sizes in self.max_dtype_bucket_sizes.items():
+                max_bucket_ids = dtype_max_bucket_id[dtype]
                 log_single_rank(
                     logger,
                     logging.INFO,
