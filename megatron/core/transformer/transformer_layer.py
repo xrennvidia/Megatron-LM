@@ -1138,9 +1138,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             # CUDA Graph captures the whole MLP/MoE part. CUDA Graph output is the layer output.
             assert len(cuda_graph_output) == 1, "CUDA Graph output should be the layer output."
             output = cuda_graph_output.pop()
-            assert (
-                not self.config.overlap_moe_expert_parallel_comm
-            ), "EP overlap must be \
+            assert not self.config.overlap_moe_expert_parallel_comm, "EP overlap must be \
                 disabled when CUDA graph captures the whole MLP/MoE part."
         elif self.is_moe_layer and CudaGraphScope.moe_router in self.config.cuda_graph_scope:
             # CUDA Graph partially captures the MoE.
