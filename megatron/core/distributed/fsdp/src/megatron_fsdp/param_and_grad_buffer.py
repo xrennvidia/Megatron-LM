@@ -21,6 +21,7 @@ import gc
 import inspect
 import logging
 import math
+import os
 import traceback
 import warnings
 from collections import defaultdict, namedtuple
@@ -952,8 +953,9 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
                     sorted(enumerate(max_bucket_sizes), key=lambda x: x[1])[
                         # Find the largest buckets we have in the pool that
                         # can support this entire FSDP unit.
-                        len(max_bucket_sizes) - len(bucket_sizes):
-                    ]
+                        len(max_bucket_sizes)
+                        - len(bucket_sizes) :
+                    ],
                 ):
                     # Update max bucket size at this offset.
                     bucket_size, bucket_id = bucket_size_id
@@ -1156,7 +1158,7 @@ class DataParallelBuffer:
             # Build the data parallel buffer index, which contains information
             # on where each parameter / gradient tensor will be stored in this
             # distributed buffer.
-            (self.item_index_map, self.bucket_index, self.shard_bucket_index) = (
+            self.item_index_map, self.bucket_index, self.shard_bucket_index = (
                 build_data_parallel_buffer_index(
                     [to_local_if_dtensor(p).shape for p in self.params],
                     self.dp_rank,
@@ -2018,7 +2020,7 @@ class ParamAndGradBuffer:
                         )
 
         # Get the parameter groups.
-        (self.parameter_groups, self.param_to_param_group, self.bucket_to_bucket_group) = (
+        self.parameter_groups, self.param_to_param_group, self.bucket_to_bucket_group = (
             _get_parameter_groups(module, bucketing_policy, meta_device_init_fp8_params)
         )
         self._init_each_parameter_group_buffers(meta_device_init_fp8_params)
@@ -2416,10 +2418,16 @@ class ParamAndGradBuffer:
                 fsdp_param_groups=self.parameter_groups,
                 size=UB_BUFFER_NUM,
                 dtype_attr="grad_dtype",
-                # TODO(@cspades): Why do gradients need a persistent buffer?
-                # fallback_to_persistent_buffer=(
-                #     self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
-                # ),
+                fallback_to_persistent_buffer=(
+                    self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                    and bool(int(os.getenv(
+                        "MEGATRON_FSDP_DBLBUF_PERSIST_GRAD_BUF",
+                        # If we are not using the MaxPoolAllocator, the FixedPoolAllocator
+                        # has risks for asymmetry of allocation strategy that can break CG,
+                        # so it is safer to turn this on when using FixedPoolAllocator.
+                        not self.ddp_config.megatron_fsdp_max_pool_double_buffer,
+                    )))
+                ),
             )
             if self.dist_index.use_hybrid_fsdp:
                 # Only required for custom communication dtype buffer allocation
@@ -2431,10 +2439,16 @@ class ParamAndGradBuffer:
                     fsdp_param_groups=self.parameter_groups,
                     size=UB_BUFFER_NUM,
                     dtype_attr="grad_dtype",
-                    # TODO(@cspades): Why do gradients need a persistent buffer?
-                    # fallback_to_persistent_buffer=(
-                    #     self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
-                    # ),
+                    fallback_to_persistent_buffer=(
+                        self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                        and bool(int(os.getenv(
+                            "MEGATRON_FSDP_DBLBUF_PERSIST_GRAD_BUF",
+                            # If we are not using the MaxPoolAllocator, the FixedPoolAllocator
+                            # has risks for asymmetry of allocation strategy that can break CG,
+                            # so it is safer to turn this on when using FixedPoolAllocator.
+                            not self.ddp_config.megatron_fsdp_max_pool_double_buffer,
+                        )))
+                    ),
                 )
             self.double_buf_units = self.weight_alloc.fsdp_double_buffer_units
         else:
@@ -4211,7 +4225,7 @@ class AllGatherPipeline:
                 UserWarning,
             )
             while len(self.param_gather_event_map) > 0:
-                (bucket_id, bwd) = next(iter(self.param_gather_event_map))
+                bucket_id, bwd = next(iter(self.param_gather_event_map))
                 self.wait_bucket_ready(bucket_id, bwd)
         for bucket_id in range(self.num_buckets):
             is_unit_bucket = self.buffer.parameter_groups[bucket_id].fsdp_unit_id is not None
