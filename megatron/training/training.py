@@ -1918,7 +1918,7 @@ def get_megatron_ddp_config(args: argparse.Namespace) -> DistributedDataParallel
         kwargs["megatron_fsdp_grad_comm_dtype"] = args.megatron_fsdp_grad_comm_dtype
         kwargs["megatron_fsdp_use_decoupled_grad"] = args.use_precision_aware_optimizer
         if args.use_megatron_fsdp and args.cuda_graph_impl != "none":
-            if CudaGraphScope.full_iteration in args.cuda_graph_scope:
+            if args.cuda_graph_impl == "full_iteration":
                 # Run Megatron-FSDP in CUDA graph-safe mode. Avoids some graph-unsafe host-side
                 # operations (such as pointer dereferencing) that can break CUDA graph replay.
                 kwargs["megatron_fsdp_cuda_graph_mode"] = True

@@ -22,6 +22,11 @@ export NCCL_NVLS_ENABLE=0
 export NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN=2
 export USE_MNNVL=1
 
+# # TE FUSED OPS
+# export USE_TE_OPS=True
+# export NVTE_CUTEDSL_FUSED_GROUPED_MLP=1
+# export CUDNN_FE_GROUPED_GEMM_DYNAMIC_MNKL=True
+
 MEGATRON_LM_DIR="/opt/Megatron-LM"
 PERF_OPT_DIR="${MEGATRON_LM_DIR}/xren_debug/perf"
 OUTPUT_ROOT="${MEGATRON_LM_DIR}/xren_debug"
@@ -205,6 +210,11 @@ options=" \
         --cuda-graph-scope mamba attn moe_router \
         --te-rng-tracker \
         --exit-interval 5"
+        # --use-transformer-engine-op-fuser \
+        # --moe-paged-stash \
+        # --moe-expert-rank-capacity-factor 1.1 \
+        # --moe-paged-stash-buffer-size-factor-cuda 1.0 \
+        # --moe-paged-stash-buffer-size-factor-cpu 0 \
         #--cuda-graph-scope mamba attn moe_router
         #--per-split-data-args-path ${BLEND_PATH} \
         #--save ${CHECKPOINT_DIR} \
