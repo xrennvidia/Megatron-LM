@@ -788,17 +788,44 @@ def forward_backward_no_pipelining(
             del output_tensor
 
     if config.finalize_model_grads_func is not None and not forward_only:
-        # Finalize model grads (perform full grad all-reduce / reduce-scatter for
-        # data parallelism and layernorm all-reduce for sequence parallelism).
-        config.finalize_model_grads_func(
-            [model],
-            total_num_tokens if config.calculate_per_token_loss else None,
-            pg_collection=pg_collection,
-            force_all_reduce=force_all_reduce,
+        is_megatron_fsdp_model = (
+            hasattr(model, 'ddp_config')
+            and model.ddp_config.use_megatron_fsdp
         )
+        using_full_iter_cg = (
+            hasattr(config, 'cuda_graph_impl')
+            and config.cuda_graph_impl == "full_iteration"
+        )
+        if not is_megatron_fsdp_model or not using_full_iter_cg:
+            # Finalize model grads (perform full grad all-reduce / reduce-scatter for
+            # data parallelism and layernorm all-reduce for sequence parallelism).
+            config.finalize_model_grads_func(
+                [model],
+                total_num_tokens if config.calculate_per_token_loss else None,
+                pg_collection=pg_collection,
+                force_all_reduce=force_all_reduce,
+            )
+        else:   # Megatron-FSDP + Full-Iteration CG
+            # Megatron-FSDP param.grad installation (and dereferencing) is eager, so we can avoid
+            # capture by the CUDA graph to dereference and reclaim memory when using full-iteration.
+            # Only synchronize AG/RS streams, which are launched during CUDA graph capture/replay.
+            model.synchronize_gradient_reduce()
+            if model.ddp_config.overlap_param_gather:
+                model.synchronize_param_gather()
+            # Defer the model gradient finalization to outside of the CG capture scope.
+            # All inputs to this function should be updated in-place by the CG replay,
+            # particularly total_num_tokens.
+            model.deferred_finalize_model_grads = partial(
+                config.finalize_model_grads_func,
+                [model],
+                total_num_tokens if config.calculate_per_token_loss else None,
+                pg_collection=pg_collection,
+                force_all_reduce=force_all_reduce,
+            )
 
     if getattr(config, 'fine_grained_activation_offloading', False):
         off_interface.reset()
+
     # Reset all_gather_pipeline bucket status before next validation iteration
     if forward_only:
         for model_chunk in [model]:
