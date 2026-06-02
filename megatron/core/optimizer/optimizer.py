@@ -553,6 +553,13 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         """Pre-processing gradients before the optimizer step, returns whether inf/nan is found."""
         timers = self.config.timers
 
+        # If using a full-iteration CUDA graph, call finalize_model_grads() here!
+        # All inputs should be updated in-place, e.g. total_num_tokens.
+        for model_chunk in self.model_chunks:
+            fn = getattr(model_chunk, 'deferred_finalize_model_grads', None)
+            if fn is not None:
+                fn()
+
         # Copy gradients from model params to main params.
         if timers is not None:
             timers('optimizer-copy-to-main-grad', log_level=1).start(
