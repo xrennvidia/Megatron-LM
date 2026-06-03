@@ -22,12 +22,12 @@ export NCCL_NVLS_ENABLE=0
 export NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN=2
 export USE_MNNVL=1
 
-# # TE FUSED OPS
-# export USE_TE_OPS=True
-# export NVTE_CUTEDSL_FUSED_GROUPED_MLP=1
-# export CUDNN_FE_GROUPED_GEMM_DYNAMIC_MNKL=True
+# TE FUSED OPS
+export USE_TE_OPS=True
+export NVTE_CUTEDSL_FUSED_GROUPED_MLP=1
+export CUDNN_FE_GROUPED_GEMM_DYNAMIC_MNKL=True
 
-MEGATRON_LM_DIR="/opt/Megatron-LM"
+MEGATRON_LM_DIR="/workspace/Megatron-Bridge/3rdparty/Megatron-LM"
 PERF_OPT_DIR="${MEGATRON_LM_DIR}/xren_debug/perf"
 OUTPUT_ROOT="${MEGATRON_LM_DIR}/xren_debug"
 ########################################################
@@ -128,6 +128,11 @@ options=" \
         --moe-flex-dispatcher-backend hybridep \
         --moe-hybridep-num-sms 32 \
         --moe-router-force-load-balancing \
+        --use-transformer-engine-op-fuser \
+        --moe-paged-stash \
+        --moe-expert-rank-capacity-factor 1.1 \
+        --moe-paged-stash-buffer-size-factor-cuda 1.0 \
+        --moe-paged-stash-buffer-size-factor-cpu 0 \
         \
         --num-workers 1 \
         --disable-gloo-process-groups \
@@ -206,8 +211,7 @@ options=" \
         --use-fused-weighted-squared-relu \
         --cross-entropy-loss-fusion \
         --cross-entropy-fusion-impl native \
-        --cuda-graph-impl local \
-        --cuda-graph-scope mamba attn moe_router \
+        --cuda-graph-impl full_iteration \
         --no-check-for-nan-in-loss-and-grad \
         --te-rng-tracker \
         --exit-interval 5"
@@ -254,7 +258,6 @@ fsdp_options=" \
     --data-parallel-sharding-strategy optim_grads_params \
     --no-gradient-accumulation-fusion \
     --ckpt-format fsdp_dtensor \
-    --megatron-fsdp-max-pool-double-buffer \
     --megatron-fsdp-grad-comm-dtype bf16 \
     --megatron-fsdp-main-params-dtype fp32 \
     --megatron-fsdp-main-grads-dtype bf16"
