@@ -266,6 +266,7 @@ fsdp_options=" \
     # --fsdp-double-buffer \
     # --megatron-fsdp-max-pool-double-buffer \
     # --fsdp-db-use-persist-buf-on-alloc-fail \
+    # --ddp-reduce-scatter-with-fp32-accumulation \
 
 profile_options=" \
     --profile \

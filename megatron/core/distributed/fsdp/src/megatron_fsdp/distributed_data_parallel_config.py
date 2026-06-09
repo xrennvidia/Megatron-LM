@@ -47,6 +47,11 @@ class DistributedDataParallelConfig:
     gradient_reduce_div_fusion: bool = True
     """If true, perform gradient reduce and division fusion."""
 
+    reduce_scatter_with_fp32_accumulation: bool = False
+    """If true, use a reduce-scatter implementation which sends lower-precision values
+       over the wire (using an all-to-all to keep total communication overhead in line
+       with the standard ring implementation) but performs accumulation locally in FP32."""
+
     suggested_communication_unit_size: int = None
     """Specifies the number of elements to communicate at once during
       FSDP (Fully Sharded Data Parallel) operations. 

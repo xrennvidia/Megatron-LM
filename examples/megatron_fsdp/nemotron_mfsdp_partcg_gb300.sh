@@ -27,11 +27,6 @@ export USE_MNNVL=1
 # export NVTE_CUTEDSL_FUSED_GROUPED_MLP=1
 # export CUDNN_FE_GROUPED_GEMM_DYNAMIC_MNKL=True
 
-# Megatron-FSDP Gradient A2A + Local Reduction
-# When set to 1, we will A2A the grad_comm_dtype
-# gradient shards and reduce in FP32 instead.
-export MEGATRON_FSDP_GRAD_COMM_A2A=0
-
 MEGATRON_LM_DIR="/opt/Megatron-LM"
 PERF_OPT_DIR="${MEGATRON_LM_DIR}/xren_debug/perf"
 OUTPUT_ROOT="${MEGATRON_LM_DIR}/xren_debug"
@@ -268,6 +263,7 @@ fsdp_options=" \
     # --fsdp-double-buffer \
     # --megatron-fsdp-max-pool-double-buffer \
     # --fsdp-db-use-persist-buf-on-alloc-fail \
+    # --ddp-reduce-scatter-with-fp32-accumulation \
 
 profile_options=" \
     --profile \
