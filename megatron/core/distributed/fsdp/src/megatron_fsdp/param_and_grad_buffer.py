@@ -4050,7 +4050,7 @@ class GradReducePipeline:
                             )
                     else:
                         # Whether to use A2A followed by a local reduction in accumulate precision.
-                        local_reduction = os.getenv("MEGATRON_FSDP_GRAD_COMM_A2A", "0") == "1"
+                        local_reduction = ddp_config.reduce_scatter_with_fp32_accumulation
                         if local_reduction:
                             # Allocate an A2A output buffer. Not compatible with NCCL UBR!
                             output_buffer = torch.empty(
@@ -4171,7 +4171,7 @@ class GradReducePipeline:
                         # All-reduce or reduce-scatter the DP-Shard gradients across DP-Outer.
                         if ddp_config.outer_dp_sharding_strategy != "no_shard":
                             # Whether to use A2A followed by a local reduction in accumulate precision.
-                            local_reduction = os.getenv("MEGATRON_FSDP_GRAD_COMM_A2A", "0") == "1"
+                            local_reduction = ddp_config.reduce_scatter_with_fp32_accumulation
                             # Retrieve the (DP-Outer, DP-Shard) gradient shard from the
                             # main gradient buffer which shards across the entire DP group,
                             # i.e. across all DP-Shard and DP-Outer ranks.
