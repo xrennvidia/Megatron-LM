@@ -215,6 +215,8 @@ options=" \
         --no-check-for-nan-in-loss-and-grad \
         --te-rng-tracker \
         --exit-interval 5"
+        # --recompute-granularity selective \
+        # --recompute-modules moe moe_act core_attn shared_experts layernorm \
         # --use-transformer-engine-op-fuser \
         # --moe-paged-stash \
         # --moe-expert-rank-capacity-factor 1.1 \
@@ -267,6 +269,8 @@ fsdp_options=" \
     # --megatron-fsdp-max-pool-double-buffer \
     # --fsdp-db-use-persist-buf-on-alloc-fail \
     # --ddp-reduce-scatter-with-fp32-accumulation \
+    # --num-distributed-optimizer-instances 2 \
+    # --outer-dp-sharding-strategy optim \
 
 profile_options=" \
     --profile \
