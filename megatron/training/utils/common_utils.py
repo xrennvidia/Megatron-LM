@@ -59,7 +59,12 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
         # params_data is a dict of device_mesh -> list of local tensors.
         params = []
         for model_chunk in model:
-            model_chunk.stop_communication()
+            # Compute norm of distributed / optimized parameters.
+            if args.cuda_graph_impl != "none":
+                # Can't access any CUDA-graphed streams.
+                model_chunk.module._replace_param_with_distributed_if_needed()
+            else:
+                model_chunk.stop_communication()
             for name, param in model_chunk.named_parameters():
                 if not hasattr(param, "_local_tensor"):
                     raise RuntimeError(
