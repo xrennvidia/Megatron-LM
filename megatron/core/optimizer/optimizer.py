@@ -1447,7 +1447,7 @@ class ChainedOptimizer(MegatronOptimizer):
                 ),
             )
         else:
-            num_zeros_in_grad = 0
+            num_zeros_in_grad = torch.zeros(1)
             for optimizer in self.chained_optimizers:
                 num_zeros_in_grad += (
                     optimizer.count_zeros() if optimizer.config.log_num_zeros_in_grad else 0

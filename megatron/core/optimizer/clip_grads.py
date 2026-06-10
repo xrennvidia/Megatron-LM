@@ -271,6 +271,4 @@ def count_zeros_fp32(
         total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
     )
 
-    total_num_zeros = total_num_zeros.item()
-
     return total_num_zeros

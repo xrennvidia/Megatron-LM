@@ -208,9 +208,11 @@ options=" \
         --cross-entropy-fusion-impl native \
         --cuda-graph-impl local \
         --cuda-graph-scope mamba attn moe_router \
+        --optimizer-cuda-graph \
         --no-check-for-nan-in-loss-and-grad \
         --te-rng-tracker \
         --exit-interval 5"
+        # --optimizer-cuda-graph \
         # --recompute-granularity selective \
         # --recompute-modules moe moe_act core_attn shared_experts layernorm \
         # --use-transformer-engine-op-fuser \
