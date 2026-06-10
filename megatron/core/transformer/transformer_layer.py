@@ -1371,10 +1371,10 @@ class MoETransformerLayer(TransformerLayer):
         # MegatronModule.__init__. Defer the transition until submodules are built.
         if (
             self.config.cuda_graph_impl == "local"
-            and self.config.cuda_graph_scope
+            and self.config.cuda_graph_modules
             and (
-                CudaGraphScope.moe_router in self.config.cuda_graph_scope
-                or CudaGraphScope.moe_preprocess in self.config.cuda_graph_scope
+                CudaGraphModule.moe_router in self.config.cuda_graph_modules
+                or CudaGraphModule.moe_preprocess in self.config.cuda_graph_modules
             )
         ):
             self.transition_cudagraph_scope('partial')
