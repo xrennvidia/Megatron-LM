@@ -151,7 +151,6 @@ options=" \
         --use-distributed-optimizer \
         --high-priority-stream-groups ep \
         --ddp-num-buckets 5 \
-        --grad-reduce-in-bf16 \
         \
         --mock-data \
         --is-hybrid-model \
