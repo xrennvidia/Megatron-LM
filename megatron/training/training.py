@@ -3457,6 +3457,19 @@ def train(
         num_microbatches = get_num_microbatches()
         update_num_microbatches(args.consumed_train_samples, consistency_check=True, verbose=True)
 
+        if (
+            args.cuda_graph_impl == "full_iteration"
+            and args.optimizer_cuda_graph
+        ):
+            # When using full-iteration + optimizer CG with Megatron-FSDP, switch to CG-mode.
+            # This prevents deleting param.grad which will be captured by the optimizer CG.
+            full_cg_wrapper = forward_backward_func
+            if args.moe_expert_rank_capacity_factor is not None:
+                full_cg_wrapper = full_cg_wrapper.forward_backward_func
+            # One step after the capture run.
+            if full_cg_wrapper.curr_iteration["training"] == args.cuda_graph_warmup_steps + 1:
+                model[0].ddp_config.megatron_fsdp_cuda_graph_mode = True
+
         # Capture CUDA Graphs.
         if (
             args.cuda_graph_impl == "transformer_engine"
@@ -3487,7 +3500,6 @@ def train(
         args.curr_iteration = iteration
         # For GRPO, we keep the data for a few epochs. DeepSeekMath paper calls this number $\mu$.
         # It is similar to a PPO epoch.
-
         if args.perform_rl_step:
             if optimizer is None:
                 # Release stale CUDA cached memory before inference.
