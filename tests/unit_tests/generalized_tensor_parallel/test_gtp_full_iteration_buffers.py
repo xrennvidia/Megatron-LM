@@ -1,5 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -113,3 +115,111 @@ def test_full_iteration_fp32_accumulation_scratch_lifetime(monkeypatch):
     finally:
         torch.cuda.synchronize()
         wrapper.reset_cuda_graph()
+
+
+def _spy_on_stream_waits(monkeypatch):
+    """Record ``(waiting stream, awaited stream)`` for every ``wait_stream`` call."""
+    waits = []
+    original = torch.cuda.Stream.wait_stream
+
+    def wait_stream(self, stream):
+        waits.append((self, stream))
+        return original(self, stream)
+
+    monkeypatch.setattr(torch.cuda.Stream, "wait_stream", wait_stream)
+    return waits
+
+
+def test_all_gather_join_waits_on_every_side_stream_when_eager(monkeypatch):
+    """A forward-only step has no finalize_model_grads to join the all-gather streams."""
+    Utils.initialize_distributed()
+    side_streams = {"attn": torch.cuda.Stream(), "mlp": torch.cuda.Stream()}
+    monkeypatch.setattr(gtp, "_AG_STREAMS", side_streams)
+    waits = _spy_on_stream_waits(monkeypatch)
+
+    gtp.wait_for_gtp_all_gather_on_current_stream()
+
+    current = torch.cuda.current_stream()
+    assert waits == [(current, stream) for stream in side_streams.values()]
+
+
+def test_all_gather_join_in_capture_skips_streams_outside_the_capture(monkeypatch):
+    """Joining a side stream that did no captured work would add a dependency on uncaptured
+    work; leaving one that did unjoined fails the capture."""
+    Utils.initialize_distributed()
+    used, unused = torch.cuda.Stream(), torch.cuda.Stream()
+    monkeypatch.setattr(gtp, "_AG_STREAMS", {"used": used, "unused": unused})
+    source = torch.ones(1024, device="cuda")
+    result = torch.empty_like(source)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        doubled = source * 2
+        used.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(used):
+            gathered = doubled + 1
+        waits = _spy_on_stream_waits(monkeypatch)
+        gtp.wait_for_gtp_all_gather_on_current_stream()
+        monkeypatch.undo()
+        result.copy_(gathered)
+
+    assert [awaited for _, awaited in waits] == [used]
+    for value in (1.0, 4.0):
+        source.fill_(value)
+        graph.replay()
+        torch.testing.assert_close(result, torch.full_like(result, 2 * value + 1))
+
+
+@pytest.mark.parametrize(
+    "full_iteration,graphed,capturing,expected",
+    [
+        (False, False, False, True),
+        (False, True, False, False),  # a partial graph bakes in one backward's schedule
+        (False, False, True, False),
+        (True, True, True, True),  # a whole-step graph holds every backward and its fence
+        (True, True, False, True),
+    ],
+)
+def test_wgrad_accumulation_eligibility_under_full_iteration(
+    monkeypatch, full_iteration, graphed, capturing, expected
+):
+    monkeypatch.setattr(gtp, "_FULL_ITERATION", full_iteration)
+    monkeypatch.setattr(gtp, "_chain_is_graphed", lambda chain_id: graphed)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+    param = SimpleNamespace(_wgrad_accum_enabled=True, chain_id="chain")
+
+    assert gtp.GTPShardedParam._can_accumulate_wgrad(param) is expected
+
+    # Neither mode makes an opted-out param or a ring-slot param eligible.
+    param._wgrad_accum_enabled = False
+    assert not gtp.GTPShardedParam._can_accumulate_wgrad(param)
+    param._wgrad_accum_enabled = True
+    param._gtp_graph_wgrad_ring_slot = object()
+    assert not gtp.GTPShardedParam._can_accumulate_wgrad(param)
+
+
+@pytest.mark.parametrize(
+    "full_iteration,capturing,fence_runs",
+    [(False, False, True), (False, True, False), (True, True, True), (True, False, True)],
+)
+def test_grad_reduction_fence_runs_accumulation_in_full_iteration_capture(
+    monkeypatch, full_iteration, capturing, fence_runs
+):
+    """Skipping the fence in a whole-step capture would drop a wgrad that the accumulation
+    window left for the fence to flush; a per-layer capture still leaves it to the eager fence."""
+    Utils.initialize_distributed()
+    calls = []
+    monkeypatch.setattr(gtp, "_FULL_ITERATION", full_iteration)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+    monkeypatch.setattr(gtp, "_AG_STREAMS", {})
+    monkeypatch.setattr(gtp, "_RS_STREAMS", {})
+    monkeypatch.setattr(
+        gtp, "_collect_inflight_wgrad_reduce_scatters", lambda: calls.append("collect")
+    )
+    monkeypatch.setattr(gtp, "wait_async_comms", lambda *args, **kwargs: calls.append("wait"))
+    monkeypatch.setattr(gtp, "_finalize_wgrad_accumulation", lambda: calls.append("close"))
+
+    gtp.wait_for_gtp_grad_reduction_on_current_stream()
+
+    # In-flight reduce-scatters are collected before the drain and the windows closed after it.
+    assert calls == (["collect", "wait", "close"] if fence_runs else ["wait"])
