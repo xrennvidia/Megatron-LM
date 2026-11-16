@@ -1479,7 +1479,15 @@ def pretrain(
     # and the other startup timestamps are all available -- see the block right
     # after those are extracted from _STARTUP_TIMESTAMPS.
 
-    if cfg_container.model.transformer.fine_grained_activation_offloading:
+    # Both schemes copy activations between the GPU and pinned host memory on every step.
+    # Without the affinity the placement of each rank relative to its GPU is left to the OS,
+    # and those copies can run through the far socket.
+    transformer_cfg = cfg_container.model.transformer
+    paged_stash_uses_host = transformer_cfg.moe_paged_stash and (
+        transformer_cfg.paged_stash_offload_factor > 0
+        or transformer_cfg.moe_paged_stash_buffer_size_factor_cpu != 0
+    )
+    if transformer_cfg.fine_grained_activation_offloading or paged_stash_uses_host:
         from megatron.core.pipeline_parallel.utils import set_ideal_affinity_for_current_gpu
         set_ideal_affinity_for_current_gpu()
 
